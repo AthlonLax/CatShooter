@@ -9,16 +9,17 @@ namespace CatShooters
 {
     public partial class Form1 : Form
     {
-        // ==================== game Settings ====================
+        // ==================== GAME SETTINGS ====================
         int gameWidth = 450;
         int gameHeight = 700;
         Timer gameTimer = new Timer();
         Random random = new Random();
 
+        // ==================== GAME SCREENS ====================
         enum GameScreen { Menu, Playing, HighScores, GameOver }
         GameScreen currentScreen = GameScreen.Menu;
 
-        // ==================== player and enemy ====================
+        // ==================== PLAYER AND GAME OBJECTS ====================
         HashSet<Keys> pressedKeys = new HashSet<Keys>();
         List<Enemy> enemies = new List<Enemy>();
         List<Bullet> bullets = new List<Bullet>();
@@ -34,6 +35,18 @@ namespace CatShooters
         int shootCooldown = 0;
         int invincibleFrames = 0;
         bool gameOver = false;
+
+        // ==================== POWER-UPS ====================
+        List<PowerUp> powerUps = new List<PowerUp>();
+        int rapidFireFrames = 0;
+        int doubleShotFrames = 0;
+        int shieldFrames = 0;
+
+        // ==================== GIANT BOSS ====================
+        bool bossAppeared = false;
+        GiantBoss boss = null;
+        List<BossBullet> bossBullets = new List<BossBullet>();
+
 
         // ==================== LEADERBOARD DATA ====================
         List<ScoreEntry> highScores = new List<ScoreEntry>();
@@ -131,13 +144,22 @@ namespace CatShooters
             frame++;
             if (shootCooldown > 0) shootCooldown--;
             if (invincibleFrames > 0) invincibleFrames--;
+            if (rapidFireFrames > 0) rapidFireFrames--;
+            if (doubleShotFrames > 0) doubleShotFrames--;
+            if (shieldFrames > 0) shieldFrames--;
 
             MovePlayer();
             Shoot();
+            SpawnGiantBoss();
             SpawnEnemies();
             MoveBullets();
             MoveEnemies();
+            MoveBoss();
+            MoveBossBullets();
+            MovePowerUps();
             CheckCollisions();
+            CheckBossCollisions();
+            CheckPowerUpCollisions();
 
             if (gameOver)
             {
@@ -165,16 +187,26 @@ namespace CatShooters
         // ==================== PLAYER SHOOTING ====================
         private void Shoot()
         {
-            if (pressedKeys.Contains(Keys.Space) && shootCooldown == 0)
+            if (shootCooldown == 0)
             {
-                bullets.Add(new Bullet(playerX + 29, playerY - 12));
-                shootCooldown = 12;
+                if (doubleShotFrames > 0)
+                {
+                    bullets.Add(new Bullet(playerX + 12, playerY - 12));
+                    bullets.Add(new Bullet(playerX + 46, playerY - 12));
+                }
+                else
+                {
+                    bullets.Add(new Bullet(playerX + 29, playerY - 12));
+                }
+
+                shootCooldown = rapidFireFrames > 0 ? 5 : 12;
             }
         }
 
         // ==================== ENEMY SPAWNING ====================
         private void SpawnEnemies()
         {
+            if (boss != null) return; // Focus on the boss fight.
             int spawnRate = Math.Max(20, 48 - score / 150);
             if (frame % spawnRate != 0) return;
 
@@ -237,6 +269,10 @@ namespace CatShooters
                         if (enemy.Health <= 0)
                         {
                             score += enemy.Type == 3 ? 100 : (enemy.Type + 1) * 10;
+                            // Every defeated cat has a chance to drop a power-up.
+                            if (random.Next(100) < 18)
+                                powerUps.Add(new PowerUp(enemy.X + enemy.Size / 2f,
+                                    enemy.Y + enemy.Size / 2f, random.Next(4)));
                             enemies.RemoveAt(i);
                             defeated = true;
                         }
@@ -245,7 +281,8 @@ namespace CatShooters
                 }
                 if (defeated) continue;
 
-                if (invincibleFrames == 0 && enemyBox.IntersectsWith(playerBox))
+                if (invincibleFrames == 0 && shieldFrames == 0 &&
+                    enemyBox.IntersectsWith(playerBox))
                 {
                     enemies.RemoveAt(i);
                     lives--;
@@ -260,6 +297,13 @@ namespace CatShooters
         {
             enemies.Clear();
             bullets.Clear();
+            powerUps.Clear();
+            bossBullets.Clear();
+            boss = null;
+            bossAppeared = false;
+            rapidFireFrames = 0;
+            doubleShotFrames = 0;
+            shieldFrames = 0;
             pressedKeys.Clear();
             playerX = (gameWidth - 64) / 2f;
             playerY = gameHeight - 110;
@@ -279,6 +323,136 @@ namespace CatShooters
             pressedKeys.Clear();
             currentScreen = GameScreen.Menu;
             Invalidate();
+        }
+
+        // ==================== POWER-UPS: SPAWN AND MOVEMENT ====================
+        // Drops: 0 = rapid fire, 1 = double shot, 2 = shield, 3 = extra life.
+        private void MovePowerUps()
+        {
+            for (int i = powerUps.Count - 1; i >= 0; i--)
+            {
+                powerUps[i].Y += 2.5f;
+                if (powerUps[i].Y > gameHeight)
+                    powerUps.RemoveAt(i);
+            }
+        }
+
+        // ==================== POWER-UPS: PICKUP EFFECTS ====================
+        private void CheckPowerUpCollisions()
+        {
+            RectangleF playerBox = new RectangleF(playerX + 8, playerY + 8, 48, 48);
+            for (int i = powerUps.Count - 1; i >= 0; i--)
+            {
+                PowerUp item = powerUps[i];
+                RectangleF itemBox = new RectangleF(item.X - 14, item.Y - 14, 28, 28);
+                if (!playerBox.IntersectsWith(itemBox)) continue;
+
+                if (item.Type == 0) rapidFireFrames = 600;       // ~10 seconds
+                if (item.Type == 1) doubleShotFrames = 600;      // ~10 seconds
+                if (item.Type == 2) shieldFrames = 600;          // ~10 seconds
+                if (item.Type == 3) lives = Math.Min(5, lives + 1);
+                powerUps.RemoveAt(i);
+            }
+        }
+
+        // ==================== GIANT BOSS: SPAWNING ====================
+        // First boss appears at 500 points, once per game.
+        private void SpawnGiantBoss()
+        {
+            if (!bossAppeared && score >= 500)
+            {
+                bossAppeared = true;
+                enemies.Clear();
+                bossBullets.Clear();
+                boss = new GiantBoss(15, 80, gameWidth - 30, 250, 100);
+            }
+        }
+
+        // ==================== GIANT BOSS: MOVEMENT AND ATTACKS ====================
+        private void MoveBoss()
+        {
+            if (boss == null) return;
+
+            // Boss enters from the top and then slides side to side.
+            if (boss.Y < 55)
+                boss.Y += 1.5f;
+            else
+            {
+                boss.X += boss.Direction * 1.1f;
+                if (boss.X < 0 || boss.X + boss.Width > gameWidth)
+                    boss.Direction *= -1;
+            }
+
+            // Shoots three slow projectiles toward the bottom.
+            if (frame % 48 == 0 && boss.Y >= 45)
+            {
+                float center = boss.X + boss.Width / 2f;
+                bossBullets.Add(new BossBullet(center - 8, boss.Y + boss.Height, -2));
+                bossBullets.Add(new BossBullet(center - 8, boss.Y + boss.Height, 0));
+                bossBullets.Add(new BossBullet(center - 8, boss.Y + boss.Height, 2));
+            }
+        }
+
+        // ==================== GIANT BOSS: PROJECTILE MOVEMENT ====================
+        private void MoveBossBullets()
+        {
+            for (int i = bossBullets.Count - 1; i >= 0; i--)
+            {
+                BossBullet shot = bossBullets[i];
+                shot.X += shot.SpeedX;
+                shot.Y += 4;
+                if (shot.Y > gameHeight || shot.X < -30 || shot.X > gameWidth + 30)
+                    bossBullets.RemoveAt(i);
+            }
+        }
+
+        // ==================== GIANT BOSS: COLLISIONS ====================
+        private void CheckBossCollisions()
+        {
+            RectangleF playerBox = new RectangleF(playerX + 12, playerY + 12, 40, 40);
+
+            if (boss != null)
+            {
+                RectangleF bossBox = new RectangleF(
+                    boss.X + 12, boss.Y + 12, boss.Width - 24, boss.Height - 24);
+
+                for (int i = bullets.Count - 1; i >= 0; i--)
+                {
+                    RectangleF shotBox = new RectangleF(bullets[i].X, bullets[i].Y, 7, 22);
+                    if (!shotBox.IntersectsWith(bossBox)) continue;
+                    bullets.RemoveAt(i);
+                    boss.Health--;
+                    if (boss.Health <= 0)
+                    {
+                        score += 1000;
+                        boss = null;
+                        bossBullets.Clear();
+                        break;
+                    }
+                }
+
+                if (boss != null && shieldFrames == 0 && invincibleFrames == 0 &&
+                    playerBox.IntersectsWith(bossBox))
+                {
+                    lives--;
+                    invincibleFrames = 90;
+                    if (lives <= 0) gameOver = true;
+                }
+            }
+
+            for (int i = bossBullets.Count - 1; i >= 0; i--)
+            {
+                BossBullet shot = bossBullets[i];
+                RectangleF shotBox = new RectangleF(shot.X, shot.Y, 16, 16);
+                if (!shotBox.IntersectsWith(playerBox)) continue;
+                bossBullets.RemoveAt(i);
+                if (shieldFrames == 0 && invincibleFrames == 0)
+                {
+                    lives--;
+                    invincibleFrames = 90;
+                    if (lives <= 0) gameOver = true;
+                }
+            }
         }
 
         // ==================== LEADERBOARD: LOAD SCORES ====================
@@ -374,6 +548,40 @@ namespace CatShooters
 
             foreach (Enemy enemy in enemies)
                 g.DrawImage(catImages[enemy.Type], enemy.X, enemy.Y, enemy.Size, enemy.Size);
+
+            // ==================== POWER-UPS ====================
+            using (Font itemFont = new Font("Segoe UI", 11, FontStyle.Bold))
+            {
+                foreach (PowerUp item in powerUps)
+                {
+                    Brush color = item.Type == 0 ? Brushes.Orange :
+                        item.Type == 1 ? Brushes.Cyan :
+                        item.Type == 2 ? Brushes.Lime : Brushes.HotPink;
+                    string letter = item.Type == 0 ? "R" :
+                        item.Type == 1 ? "D" : item.Type == 2 ? "S" : "+";
+                    g.FillEllipse(color, item.X - 16, item.Y - 16, 32, 32);
+                    g.DrawEllipse(Pens.White, item.X - 16, item.Y - 16, 32, 32);
+                    g.DrawString(letter, itemFont, Brushes.Black, item.X - 7, item.Y - 11);
+                }
+            }
+
+            // ==================== GIANT BOSS ====================
+            if (boss != null)
+            {
+                // Stretch existing boss cat sprite to nearly full map width.
+                g.DrawImage(catImages[3], boss.X, boss.Y, boss.Width, boss.Height);
+                g.FillRectangle(Brushes.DarkRed, 30, 62, gameWidth - 60, 14);
+                g.FillRectangle(Brushes.LimeGreen, 30, 62,
+                    (gameWidth - 60) * Math.Max(0, boss.Health) / boss.MaxHealth, 14);
+                using (Font bossFont = new Font("Segoe UI", 12, FontStyle.Bold))
+                    DrawCentered(g, "GIANT CAT BOSS", bossFont, Brushes.White, 35);
+            }
+
+            foreach (BossBullet shot in bossBullets)
+            {
+                g.FillEllipse(Brushes.OrangeRed, shot.X, shot.Y, 16, 16);
+                g.DrawEllipse(Pens.Yellow, shot.X, shot.Y, 16, 16);
+            }
             foreach (Bullet bullet in bullets)
             {
                 g.FillRectangle(Brushes.Cyan, bullet.X, bullet.Y, 7, 22);
@@ -383,15 +591,29 @@ namespace CatShooters
                 (invincibleFrames == 0 || frame % 8 < 4))
                 g.DrawImage(playerImage, playerX, playerY, 64, 64);
 
+            // ==================== HUD ====================
             using (Font hudFont = new Font("Segoe UI", 15, FontStyle.Bold))
                 g.DrawString("SCORE: " + score + "    LIVES: " + lives,
                     hudFont, Brushes.White, 14, 12);
+
+            string effects = "";
+            if (rapidFireFrames > 0) effects += "RAPID ";
+            if (doubleShotFrames > 0) effects += "DOUBLE ";
+            if (shieldFrames > 0) effects += "SHIELD ";
+            if (effects.Length > 0)
+            {
+                using (Font effectFont = new Font("Segoe UI", 11, FontStyle.Bold))
+                    g.DrawString(effects, effectFont, Brushes.Yellow, 14, 43);
+            }
+
+            if (shieldFrames > 0 && currentScreen == GameScreen.Playing)
+                g.DrawEllipse(Pens.Lime, playerX - 8, playerY - 8, 80, 80);
 
             if (currentScreen == GameScreen.GameOver)
                 DrawGameOverMenu(g);
         }
 
-        // ==================== MAIN MENU ====================
+        // ====================  MAIN MENU ====================
         private void DrawMenu(Graphics g)
         {
             using (Font title = new Font("Segoe UI", 30, FontStyle.Bold))
@@ -442,14 +664,14 @@ namespace CatShooters
             }
         }
 
-        // ==================== DRAWING ====================
+        // ==================== CENTERED TEXT ====================
         private void DrawCentered(Graphics g, string text, Font font, Brush brush, float y)
         {
             SizeF size = g.MeasureString(text, font);
             g.DrawString(text, font, brush, (gameWidth - size.Width) / 2, y);
         }
 
-        // ==================== GAME CLASSES ====================
+        // ==================== GAME Object/enemy ====================
         private class Enemy
         {
             public float X, Y, Speed;
@@ -464,6 +686,32 @@ namespace CatShooters
         {
             public float X, Y;
             public Bullet(float x, float y) { X = x; Y = y; }
+        }
+
+        // ==================== POWER-UP CLASS ====================
+        private class PowerUp
+        {
+            public float X, Y;
+            public int Type;
+            public PowerUp(float x, float y, int type)
+            { X = x; Y = y; Type = type; }
+        }
+
+        // ==================== GIANT BOSS CLASS ====================
+        private class GiantBoss
+        {
+            public float X, Y, Width, Height, Direction = 1;
+            public int Health, MaxHealth;
+            public GiantBoss(float x, float y, float width, float height, int health)
+            { X = x; Y = y; Width = width; Height = height; Health = health; MaxHealth = health; }
+        }
+
+        // ==================== BOSS PROJECTILE CLASS ====================
+        private class BossBullet
+        {
+            public float X, Y, SpeedX;
+            public BossBullet(float x, float y, float speedX)
+            { X = x; Y = y; SpeedX = speedX; }
         }
 
         private class ScoreEntry
